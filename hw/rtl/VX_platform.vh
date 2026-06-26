@@ -229,10 +229,21 @@
 
 `define STRINGIFY(x) `"x`"
 
+`ifdef SYNTHESIS
+// Synopsys DC's Presto preprocessor does not token-paste text with `__LINE__,
+// so `g_map_aos_soa_`__LINE__` lexes as two tokens (duplicate/garbled labels).
+// Under synthesis, use an unnamed generate-for (the tool auto-uniquifies the
+// implicit genblk names); waveform hierarchy is irrelevant here.
+`define MAP_AOS_SOA(__i, __size, __lhs, __rhs) \
+    for (genvar __i = 0; __i < (__size); __i++) begin \
+        assign __lhs = __rhs; \
+    end
+`else
 `define MAP_AOS_SOA(__i, __size, __lhs, __rhs) \
     for (genvar __i = 0; __i < (__size); __i++) begin : g_map_aos_soa_`__LINE__ \
         assign __lhs = __rhs; \
     end
+`endif
 
 `define CLOG2(x)    $clog2(x)
 `define FLOG2(x)    ($clog2(x) - (((1 << $clog2(x)) > (x)) ? 1 : 0))
