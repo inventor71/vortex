@@ -17,7 +17,11 @@ module VX_tcu_tfr_align import VX_tcu_pkg::*; #(
     parameter `STRING INSTANCE_ID = "",
     parameter N     = 5,
     parameter WI    = 25,
-    parameter WO    = WI + 2
+    parameter WO    = WI + 2,
+    // Result mantissa width carried by the significand: FP32-acc=23, BF16-acc=7.
+    // The input significand has MANT+1 magnitude bits (= WI-1). Default keeps the
+    // historical FP32 behavior (literals were hard-coded to 23/24).
+    parameter MANT  = 23
 ) (
     input  wire                 clk,
     input  wire                 valid_in,
@@ -36,7 +40,7 @@ module VX_tcu_tfr_align import VX_tcu_pkg::*; #(
     `UNUSED_SPARAM (INSTANCE_ID)
     `UNUSED_VAR ({clk, valid_in, req_id})
 
-    localparam MAX_PRE_SHIFT = WI - 23;
+    localparam MAX_PRE_SHIFT = WI - MANT;
     localparam SHIFT_MAG_W   = (WI - 1) + MAX_PRE_SHIFT;
 
     wire [TCU_EXP_BITS-1:0] or_red[N:0] /* verilator split_var */;
@@ -98,9 +102,9 @@ module VX_tcu_tfr_align import VX_tcu_pkg::*; #(
         // 2. Pre-Shift Magnitude
         wire [SHIFT_MAG_W-1:0] mag_shifted;
         if (i == N-1) begin : g_c_term
-            assign mag_shifted = { {(MAX_PRE_SHIFT - (WI - 24)){1'b0}}, in_mag, {(WI - 24){1'b0}} };
+            assign mag_shifted = { {(MAX_PRE_SHIFT - (WI - (MANT+1))){1'b0}}, in_mag, {(WI - (MANT+1)){1'b0}} };
         end else begin : g_prod_term
-            assign mag_shifted = { in_mag, {(WI - 23){1'b0}} };
+            assign mag_shifted = { in_mag, {(WI - MANT){1'b0}} };
         end
 
         // 3. Shift adjustment

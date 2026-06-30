@@ -17,7 +17,12 @@ module VX_tcu_tfr_norm_round import VX_tcu_pkg::*; #(
     parameter `STRING INSTANCE_ID = "",
     parameter WA = 30,
     parameter EXP_W = 10,
-    parameter C_HI_W = 8
+    parameter C_HI_W = 8,
+    // Result mantissa width: FP32-acc=23 (default), BF16-acc=7. Only the magnitude
+    // datapath narrows — the exponent path (EXP_W, bias, saturation) is identical
+    // because BF16 shares FP32's 8-bit exponent. The packed result is always
+    // left-justified into 32 bits, so MANT=7 lands the BF16 word in result[31:16].
+    parameter MANT = 23
 ) (
     input wire          clk,
     input wire          valid_in,
@@ -59,8 +64,11 @@ module VX_tcu_tfr_norm_round import VX_tcu_pkg::*; #(
     wire signed [EXP_W-1:0] norm_exp_plus1;
     wire signed [EXP_W-1:0] norm_exp_plus2;
 
-    // norm_exp_base = max_exp - (lz_count_pred + 128)
-    wire [EXP_W-1:0] sub_term = EXP_W'({1'b1, 2'b00, lz_count_pred});
+    // norm_exp_base = max_exp - (lz_count_pred + 128). The +128 cancels the +128
+    // folded into the multiplier's BIAS_BASE; it is width-independent, so add it
+    // explicitly rather than positioning a literal bit (the old {1'b1,2'b00,lzc}
+    // form assumed clog2(WA)==5, which only holds for the FP32-acc width).
+    wire [EXP_W-1:0] sub_term = EXP_W'(lz_count_pred) + EXP_W'(128);
     VX_ks_adder #(
         .N(EXP_W),
         .BYPASS (`FORCE_BUILTIN_ADDER(EXP_W))
@@ -75,38 +83,41 @@ module VX_tcu_tfr_norm_round import VX_tcu_pkg::*; #(
     assign norm_exp_plus1 = norm_exp_base + EXP_W'(1'b1);
     assign norm_exp_plus2 = norm_exp_base + EXP_W'(2'd2);
 
+    // Aligned window: (MANT+1) significand bits + guard + round + sticky.
+    localparam AB = MANT + 4;
+
     // Shift and overshift correction
     wire [WA:0] abs_sum_ext = {1'b0, abs_sum};
     wire [WA:0] shifted_sum_raw = abs_sum_ext << lz_count_pred;
 
     wire overshift = shifted_sum_raw[WA];
 
-    wire [26:0] aligned_bits = overshift ? shifted_sum_raw[WA   -: 27]
-                                         : shifted_sum_raw[WA-1 -: 27];
+    wire [AB-1:0] aligned_bits = overshift ? shifted_sum_raw[WA   -: AB]
+                                           : shifted_sum_raw[WA-1 -: AB];
 
     // Parallel rounding
-    wire [23:0] norm_man   = aligned_bits[26:3];
-    wire        guard_bit  = aligned_bits[2];
-    wire        round_bit  = aligned_bits[1];
-    wire        sticky_bit = aligned_bits[0] | (|shifted_sum_raw[WA-27:0]) | sticky_in;
-    wire        lsb_bit    = norm_man[0];
+    wire [MANT:0] norm_man   = aligned_bits[AB-1:3];
+    wire          guard_bit  = aligned_bits[2];
+    wire          round_bit  = aligned_bits[1];
+    wire          sticky_bit = aligned_bits[0] | (|shifted_sum_raw[WA-AB:0]) | sticky_in;
+    wire          lsb_bit    = norm_man[0];
     wire round_up = guard_bit && (round_bit || sticky_bit || lsb_bit);
 
-    wire [24:0] man_plus_zero = {1'b0, norm_man};
-    wire [24:0] rounded_sig_full;
+    wire [MANT+1:0] man_plus_zero = {1'b0, norm_man};
+    wire [MANT+1:0] rounded_sig_full;
     VX_ks_adder #(
-        .N(25),
-        .BYPASS (`FORCE_BUILTIN_ADDER(25))
+        .N(MANT+2),
+        .BYPASS (`FORCE_BUILTIN_ADDER(MANT+2))
     ) round_adder (
         .cin   (round_up),
         .dataa (man_plus_zero),
-        .datab (25'd0),
+        .datab ((MANT+2)'(0)),
         .sum   (rounded_sig_full),
         `UNUSED_PIN (cout)
     );
 
-    wire carry_out = rounded_sig_full[24];
-    wire [22:0] final_man = carry_out ? rounded_sig_full[23:1] : rounded_sig_full[22:0];
+    wire carry_out = rounded_sig_full[MANT+1];
+    wire [MANT-1:0] final_man = carry_out ? rounded_sig_full[MANT:1] : rounded_sig_full[MANT-1:0];
 
     // Final exponent and exception
     logic signed [EXP_W-1:0] final_exp_s;
@@ -137,11 +148,16 @@ module VX_tcu_tfr_norm_round import VX_tcu_pkg::*; #(
         end
     end
 
+    // Left-justify the MANT-bit mantissa into the 23-bit FP32 mantissa field, so the
+    // result is always 32-bit with the live word in result[31 : 31-(8+MANT)]. For
+    // MANT=23 this is standard FP32; for MANT=7 the BF16 word occupies result[31:16].
+    wire [22:0] man_field = 23'(final_man) << (23 - MANT);
+
     wire [31:0] fp_nan_result = {1'b0, 8'hFF, 1'b1, 22'd0};
     wire [31:0] fp_inf_result = {exceptions.sign, 8'hFF, 23'd0};
     wire [31:0] fp_zero_result = {sum_sign, 8'd0, 23'd0};
     wire [31:0] fp_overflow_result = {sum_sign, 8'hFF, 23'd0};
-    wire [31:0] fp_normal_result = {sum_sign, packed_exp, final_man};
+    wire [31:0] fp_normal_result = {sum_sign, packed_exp, man_field};
 
     logic [31:0] fp_result;
     always_comb begin
