@@ -534,6 +534,9 @@ module VX_tcu_core import VX_gpu_pkg::*, VX_tcu_pkg::*; #(
         `elsif VX_CFG_TCU_TYPE_TFR
             VX_tcu_fedp_tfr #(
                 .INSTANCE_ID (INSTANCE_ID),
+            `ifdef VX_CFG_TCU_DSM_ENABLE
+                .LANE_MASK (1),
+            `endif
                 .LATENCY (FEDP_LATENCY),
                 .N (TCU_TC_K),
                 .SF (FEDP_SF)
